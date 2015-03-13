@@ -32,18 +32,30 @@ def save_image(image, tmp=None):
 
     return directory
 
+def compress_layer(layer, layer_directory, image_directory, base_directory):
+
+    for dirpath, dirnames, filenames in os.walk(os.path.join(image_directory, layer, 'layer')):
+        pass
+
 def create_diff(tmp, image_history, image_directory, base_history, base_directory):
     diff_directory = os.path.join(tmp, 'diff')
     os.makedirs(diff_directory)
 
     for layer in reversed(image_history):
+        layer_directory = os.path.join(diff_directory, layer)
+        os.makedirs(layer_directory)
+
+        # copy meta data
+        for filename in ['json', 'VERSION']:
+            shutil.copyfile(os.path.join(image_directory, layer, filename), os.path.join(layer_directory, filename))
 
         # if layer is the same in both images
-        # only create the empty layer directory
+        # only create the layer directory with meta data
         if layer in base_history:
             assert image_history.index(layer) == base_history.index(layer)
-            os.makedirs(os.path.join(diff_directory, layer))
             continue
+
+        compress_layer(layer, layer_directory, image_directory, base_directory)
 
     return diff_directory
 
