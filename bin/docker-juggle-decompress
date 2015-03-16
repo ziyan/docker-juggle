@@ -1,0 +1,170 @@
+#!/usr/bin/env python
+
+import subprocess
+import argparse
+import sys
+import os
+import tarfile
+import tempfile
+import base64
+import collections
+import time
+
+PROG = os.path.basename(sys.argv[0])
+
+def get_image_history(image):
+    output = subprocess.check_output(['docker', 'history', '-q', '--no-trunc', image])
+    images = filter(None, output.split())
+    assert len(images) > 0
+    return images
+
+def save_image(image):
+    process = subprocess.Popen(['docker', 'save', image], stdout=subprocess.PIPE)
+    return tarfile.open(fileobj=process.stdout, mode='r|')
+
+def decompress_layer(layer_tar, diff_tar):
+    tis = []
+
+    for ti in diff_tar:
+
+        # add non file directly
+        if not ti.isfile():
+            layer_tar.addfile(ti)
+            continue
+
+        # add non empty file directly
+        if ti.size > 0:
+            layer_tar.addfile(ti, diff_tar.extractfile(ti))
+            continue
+
+        layer = ti.pax_headers.get('docker.juggle.layer', None)
+        name = ti.pax_headers.get('docker.juggle.name', None)
+
+        # add empty file directly
+        if not layer or not name:
+            assert not layer and not name
+            layer_tar.addfile(ti)
+            continue
+
+        # file is same from base, remember to extract it
+        assert layer and name
+        tis.append(ti)
+
+    return tis
+
+def decompress(output_tar, input_tar, base_tar, base_history):
+
+    layers = dict()
+
+    # first, go through input to gather info about files needed from base
+    for info in input_tar:
+
+        # see a layer directory
+        if not info.isfile():
+            assert info.isdir()
+            output_tar.addfile(info)
+
+            # remember layer
+            layers[info.name] = None
+            continue
+
+        # copy metadata out
+        if os.path.basename(info.name) != 'diff.tar.gz':
+            output_tar.addfile(info, input_tar.extractfile(info))
+            continue
+
+        layer = os.path.dirname(info.name)
+        assert layer in layers
+        assert layer not in base_history
+
+        # create temp file
+        tmp = tempfile.TemporaryFile(prefix='%s-' % PROG, suffix='.tar')
+        tar = tarfile.open(fileobj=tmp, mode='w|')
+
+        # apply the diff
+        with tarfile.open(fileobj=input_tar.extractfile(info), mode='r|gz') as diff_tar:
+            layers[layer] = (tmp, tar, decompress_layer(tar, diff_tar))
+
+    # index missed files
+    index = collections.defaultdict(dict)
+    for _, data in layers.iteritems():
+        if not data:
+            continue
+
+        _, tar, tis = data
+        for ti in tis:
+            layer = ti.pax_headers['docker.juggle.layer']
+            name = base64.b64decode(ti.pax_headers['docker.juggle.name'])
+            index[layer][name] = (tar, ti)
+
+    # then, go through base tar and gather missed files
+    for info in base_tar:
+        if not info.isfile():
+            assert info.isdir()
+            continue
+
+        if os.path.basename(info.name) != 'layer.tar':
+            continue
+
+        layer = os.path.dirname(info.name)
+
+        # if layer did not have a diff.tar.gz, the layer must have be identical
+        # copy layer.tar directly
+        if layer in layers:
+            assert layers[layer] is None
+            output_tar.addfile(info, base_tar.extractfile(info))
+            continue
+
+        with tarfile.open(fileobj=base_tar.extractfile(info), mode='r|') as layer_tar:
+            for ti in layer_tar:
+                if not ti.isfile() or ti.size <= 0:
+                    continue
+                
+                results = index[layer].get(ti.name, None)
+                if not results:
+                    continue
+                tar, ti2 = results
+                ti2.size = ti.size
+                tar.addfile(ti2, layer_tar.extractfile(ti))
+
+    # last, write the layer.tar files in the output tar
+    for layer, data in layers.iteritems():
+        if not data:
+            continue
+
+        # close up layer.tar
+        tmp, tar, _ = data
+        tar.close()
+
+        # create a tar info
+        info = tarfile.TarInfo(name=os.path.join(layer, 'layer.tar'))
+        info.size = tmp.tell()
+        info.mtime = time.time()
+        
+        # write layer.tar into output tar
+        tmp.seek(0, os.SEEK_SET)
+        output_tar.addfile(info, tmp)
+        tmp.close()
+
+def run():
+    with tarfile.open(fileobj=sys.stdin, mode='r|*', format=tarfile.PAX_FORMAT) as input_tar:
+
+        # make sure base image exists
+        base_history = get_image_history(input_tar.pax_headers['docker.juggle.base'])
+
+        # save the base image
+        with save_image(base_history[0]) as base_tar:
+            with tarfile.open(fileobj=sys.stdout, mode='w|') as output_tar:
+                decompress(output_tar, input_tar, base_tar, base_history)
+
+def main():
+
+    # parse argument
+    parser = argparse.ArgumentParser(description='Juggle docker image between hosts. Import docker image diffs.')
+    args = parser.parse_args()
+
+    run()
+
+if __name__ == '__main__':
+    main()
+
