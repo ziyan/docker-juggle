@@ -9,8 +9,91 @@ import tempfile
 import base64
 import collections
 import time
+import struct
+
+try:
+    from cStringIO import StringIO
+except ImportError:
+    from StringIO import StringIO
 
 PROG = os.path.basename(sys.argv[0])
+HEADERS = [
+    'name',
+    'mode',
+    'uid',
+    'gid',
+    'size',
+    'type',
+    'linkname',
+    'uname',
+    'gname',
+    'devmajor',
+    'devminor',
+]
+
+class TarInfo(tarfile.TarInfo):
+    def get_info(self, encoding, errors):
+        """Return the TarInfo's attributes as a dictionary.
+        """
+        info = {
+            "name":     self.name,
+            "mode":     self.mode,
+            "uid":      self.uid,
+            "gid":      self.gid,
+            "size":     self.size,
+            "mtime":    self.mtime,
+            "chksum":   self.chksum,
+            "type":     self.type,
+            "linkname": self.linkname,
+            "uname":    self.uname,
+            "gname":    self.gname,
+            "devmajor": self.devmajor,
+            "devminor": self.devminor
+        }
+
+        if info["type"] == tarfile.DIRTYPE and not info["name"].endswith("/"):
+            info["name"] += "/"
+
+        for key in ("name", "linkname", "uname", "gname"):
+            if type(info[key]) is unicode:
+                info[key] = info[key].encode(encoding, errors)
+
+        return info
+
+    @staticmethod
+    def _create_header(info, format):
+        """Return a header block. info is a dictionary with file
+           information, format must be one of the *_FORMAT constants.
+        """
+        parts = [
+            tarfile.stn(info.get("name", ""), 100),
+            tarfile.itn(info.get("mode", 0), 8, format),
+            tarfile.itn(info.get("uid", 0), 8, format),
+            tarfile.itn(info.get("gid", 0), 8, format),
+            tarfile.itn(info.get("size", 0), 12, format),
+            tarfile.itn(info.get("mtime", 0), 12, format),
+            "        ", # checksum field
+            info.get("type", tarfile.REGTYPE),
+            tarfile.stn(info.get("linkname", ""), 100),
+            tarfile.stn(info.get("magic", tarfile.POSIX_MAGIC), 8),
+            tarfile.stn(info.get("uname", ""), 32),
+            tarfile.stn(info.get("gname", ""), 32),
+            tarfile.itn(info.get("devmajor", 0), 8, format),
+            tarfile.itn(info.get("devminor", 0), 8, format),
+            tarfile.stn(info.get("prefix", ""), 155)
+        ]
+
+        buf = struct.pack("%ds" % tarfile.BLOCKSIZE, "".join(parts))
+        chksum = tarfile.calc_chksums(buf[-tarfile.BLOCKSIZE:])[0]
+        buf = buf[:-364] + "%06o\0" % chksum + buf[-357:]
+        return buf
+
+def duplicate_tar_info(ti):
+    ti2 = TarInfo()
+    for field in HEADERS:
+        setattr(ti2, field, getattr(ti, field))
+    ti2.mtime = time.time()
+    return ti2
 
 def get_image_history(image):
     output = subprocess.check_output(['docker', 'history', '-q', '--no-trunc', image])
@@ -23,99 +106,68 @@ def save_image(image):
     return tarfile.open(fileobj=process.stdout, mode='r|')
 
 def decompress_layer(layer_tar, diff_tar):
-    tis = []
+    index = collections.defaultdict(dict)
 
     for ti in diff_tar:
 
+        headers = ti.pax_headers
+        ti2 = duplicate_tar_info(ti)
+
+        # restore mode bits
+        ti2.mode = int(headers.get('docker.juggle.mode', ti.mode))
+        sys.stderr.write('%d\n' % ti2.mode)
+
         # add non file directly
         if not ti.isfile():
-            layer_tar.addfile(ti)
+            layer_tar.addfile(ti2)
             continue
 
         # add non empty file directly
         if ti.size > 0:
-            layer_tar.addfile(ti, diff_tar.extractfile(ti))
+            layer_tar.addfile(ti2, diff_tar.extractfile(ti))
             continue
 
-        layer = ti.pax_headers.get('docker.juggle.layer', None)
-        name = ti.pax_headers.get('docker.juggle.name', None)
+        layer = headers.get('docker.juggle.layer', None)
+        name = headers.get('docker.juggle.name', None)
+        size = headers.get('docker.juggle.size', None)
 
         # add empty file directly
-        if not layer or not name:
-            assert not layer and not name
-            layer_tar.addfile(ti)
+        if not layer or not name or not size:
+            assert not layer and not name and not size
+            layer_tar.addfile(ti2)
             continue
 
         # file is same from base, remember to extract it
-        assert layer and name
-        tis.append(ti)
+        assert layer and name and size
+        name = base64.b64decode(name)
+        size = int(size)
 
-    return tis
+        # reset pax headers so that we don't confuse docker daemon
+        ti2.size = size
 
-def decompress(output_tar, input_tar, base_tar, base_history):
+        # remember where to put file when we found it in base
+        index[layer][name] = (layer_tar, ti2)
 
-    layers = dict()
+    return index
 
-    # first, go through input to gather info about files needed from base
-    for info in input_tar:
-
-        # see a layer directory
-        if not info.isfile():
-            assert info.isdir()
-            output_tar.addfile(info)
-
-            # remember layer
-            layers[info.name] = None
+def construct_from_base(output_tar, base_tar, layers, index):
+    for ti in base_tar:
+        if not ti.isfile():
+            assert ti.isdir()
             continue
 
-        # copy metadata out
-        if os.path.basename(info.name) != 'diff.tar.gz':
-            output_tar.addfile(info, input_tar.extractfile(info))
+        if os.path.basename(ti.name) != 'layer.tar':
             continue
 
-        layer = os.path.dirname(info.name)
-        assert layer in layers
-        assert layer not in base_history
-
-        # create temp file
-        tmp = tempfile.TemporaryFile(prefix='%s-' % PROG, suffix='.tar')
-        tar = tarfile.open(fileobj=tmp, mode='w|')
-
-        # apply the diff
-        with tarfile.open(fileobj=input_tar.extractfile(info), mode='r|gz') as diff_tar:
-            layers[layer] = (tmp, tar, decompress_layer(tar, diff_tar))
-
-    # index missed files
-    index = collections.defaultdict(dict)
-    for _, data in layers.iteritems():
-        if not data:
-            continue
-
-        _, tar, tis = data
-        for ti in tis:
-            layer = ti.pax_headers['docker.juggle.layer']
-            name = base64.b64decode(ti.pax_headers['docker.juggle.name'])
-            index[layer][name] = (tar, ti)
-
-    # then, go through base tar and gather missed files
-    for info in base_tar:
-        if not info.isfile():
-            assert info.isdir()
-            continue
-
-        if os.path.basename(info.name) != 'layer.tar':
-            continue
-
-        layer = os.path.dirname(info.name)
+        layer = os.path.dirname(ti.name)
 
         # if layer did not have a diff.tar.gz, the layer must have be identical
         # copy layer.tar directly
-        if layer in layers:
-            assert layers[layer] is None
-            output_tar.addfile(info, base_tar.extractfile(info))
+        if layer in layers and layers[layer] is True:
+            output_tar.addfile(ti, base_tar.extractfile(ti))
             continue
 
-        with tarfile.open(fileobj=base_tar.extractfile(info), mode='r|') as layer_tar:
+        with tarfile.open(fileobj=base_tar.extractfile(ti), mode='r|') as layer_tar:
             for ti in layer_tar:
                 if not ti.isfile() or ti.size <= 0:
                     continue
@@ -124,27 +176,85 @@ def decompress(output_tar, input_tar, base_tar, base_history):
                 if not results:
                     continue
                 tar, ti2 = results
-                ti2.size = ti.size
+                assert ti2.size == ti.size
+
                 tar.addfile(ti2, layer_tar.extractfile(ti))
 
-    # last, write the layer.tar files in the output tar
-    for layer, data in layers.iteritems():
-        if not data:
-            continue
+def write_layer_tar(output_tar, layer, tar, tmp):
+    # close up layer.tar
+    tar.close()
 
-        # close up layer.tar
-        tmp, tar, _ = data
-        tar.close()
+    # create a tar info
+    ti = tarfile.TarInfo(name=os.path.join(layer, 'layer.tar'))
+    ti.size = tmp.tell()
+    ti.mtime = time.time()
+    
+    # write layer.tar into output tar
+    tmp.seek(0, os.SEEK_SET)
+    output_tar.addfile(ti, tmp)
 
-        # create a tar info
-        info = tarfile.TarInfo(name=os.path.join(layer, 'layer.tar'))
-        info.size = tmp.tell()
-        info.mtime = time.time()
+def decompress(output_tar, input_tar, base_tar, base_history):
+
+    layers = dict()
+    tmps = dict()
+    tars = dict()
+    index = collections.defaultdict(dict)
+
+    try:
+
+        # first, go through input tar to gather info about files needed from base
+        for ti in input_tar:
+
+            # see a layer directory
+            if not ti.isfile():
+                assert ti.isdir()
+                output_tar.addfile(ti)
+
+                # remember layer
+                layers[ti.name] = True
+                continue
+
+            # copy other metadata out
+            if os.path.basename(ti.name) != 'diff.tar.gz':
+                output_tar.addfile(ti, input_tar.extractfile(ti))
+                continue
+
+            # deal with diff.tar.gz
+            layer = os.path.dirname(ti.name)
+            assert layer in layers
+            assert layer not in base_history
+
+            # remember the layer.tar has changes in it
+            layers[layer] = False
+
+            # create temp file and open it to write layer.tar
+            tmps[layer] = tempfile.TemporaryFile(prefix='%s-' % PROG, suffix='.tar')
+            tars[layer] = tarfile.open(fileobj=tmps[layer], mode='w|', format=tarfile.GNU_FORMAT)
+
+            # apply the diff, for this step, we are only extracting changed files
+            with tarfile.open(fileobj=input_tar.extractfile(ti), mode='r|gz', format=tarfile.PAX_FORMAT) as diff_tar:
+                results = decompress_layer(tars[layer], diff_tar)
+                for layer, data in results.iteritems():
+                    index[layer].update(data)
+
+        # then, go through base tar and gather missed files
+        construct_from_base(output_tar, base_tar, layers, index)
         
-        # write layer.tar into output tar
-        tmp.seek(0, os.SEEK_SET)
-        output_tar.addfile(info, tmp)
-        tmp.close()
+        # last, write the layer.tar files in the output tar
+        for layer, not_changed in layers.iteritems():
+            tmp = tmps.get(layer, None)
+            tar = tars.get(layer, None)
+
+            if not tmp or not tar:
+                assert not_changed is True
+                assert not tmp and not tar
+                continue
+
+            write_layer_tar(output_tar, layer, tar, tmp)
+
+    finally:
+        for tmp in tmps.values():
+            tmp.close()
 
 def run():
     with tarfile.open(fileobj=sys.stdin, mode='r|*', format=tarfile.PAX_FORMAT) as input_tar:
@@ -154,7 +264,7 @@ def run():
 
         # save the base image
         with save_image(base_history[0]) as base_tar:
-            with tarfile.open(fileobj=sys.stdout, mode='w|') as output_tar:
+            with tarfile.open(fileobj=sys.stdout, mode='w|', format=tarfile.GNU_FORMAT) as output_tar:
                 decompress(output_tar, input_tar, base_tar, base_history)
 
 def main():

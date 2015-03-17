@@ -1,0 +1,175 @@
+#!/usr/bin/env python
+
+import subprocess
+import argparse
+import sys
+import os
+import tarfile
+import tempfile
+import base64
+import collections
+import time
+import re
+import hashlib
+
+try:
+    from cStringIO import StringIO
+except ImportError:
+    from StringIO import StringIO
+
+try:
+    import simplejson as json
+except ImportError:
+    import json
+
+PROG = os.path.basename(sys.argv[0])
+HEADERS = [
+    'name',
+    'mode',
+    'uid',
+    'gid',
+    'size',
+    'type',
+    'linkname',
+    'uname',
+    'gname',
+    'devmajor',
+    'devminor',
+]
+
+def is_layer_id(layer):
+    return re.match(r'^[0-9a-f]{64}$', layer)
+
+def copy_file(f, w):
+    while True:
+        buf = f.read(4096)
+        if not buf:
+            break
+        w.write(buf)
+
+def load_json(output_tar, input_tar, ti):
+    data = json.load(input_tar.extractfile(ti))
+    raw = json.dumps(data)
+    ti.size = len(raw)
+    output_tar.addfile(ti, StringIO(raw))
+    return data
+
+def sha256(data, f=None):
+    h = hashlib.sha256(data)
+    if not f:
+        return h.hexdigest()
+    while True:
+        buf = f.read(4096)
+        if not buf:
+            break
+        h.update(buf)
+    return h.hexdigest()
+
+def hash_layer(layer_tar):
+    hashes = []
+    for ti in layer_tar:
+        if ti.mode < 1000:
+            sys.stderr.write('%d\n' % ti.mode)
+        header = ''
+        for field in HEADERS:
+            value = getattr(ti, field)
+            if field == 'type':
+                field = 'typeflag'
+            elif field == 'name':
+                if ti.isdir() and not value.endswith('/'):
+                    value += '/'
+            header += '{0}{1}'.format(field, value)
+        # sys.stderr.write(header+'\n')
+        if ti.size > 0:
+            hashes.append(sha256(header, layer_tar.extractfile(ti)))
+        else:
+            hashes.append(sha256(header))
+    hashes.sort()
+    return sha256(''.join(hashes))
+
+def validate(output_tar, input_tar):
+    repositories = None
+    layers = dict()
+    hashes = dict()
+
+    for ti in input_tar:
+
+        # there should only be layer directories
+        if not ti.isfile():
+            assert ti.isdir()
+            assert is_layer_id(ti.name)
+            continue
+
+        # load repositories file
+        if ti.name == 'repositories':
+            repositories = load_json(output_tar, input_tar, ti)
+            continue
+
+        if os.path.basename(ti.name) == 'json':
+            layer = os.path.dirname(ti.name)
+            assert is_layer_id(layer)
+            layers[layer] = load_json(output_tar, input_tar, ti)
+            continue
+
+        if os.path.basename(ti.name) == 'layer.tar':
+            layer = os.path.dirname(ti.name)
+            assert is_layer_id(layer)
+            with tempfile.TemporaryFile(prefix='%s-' % PROG, suffix='.tar') as tmp:
+                copy_file(input_tar.extractfile(ti), tmp)
+                assert ti.size == tmp.tell()
+
+                tmp.seek(0, os.SEEK_SET)
+                with tarfile.open(fileobj=tmp, mode='r|') as layer_tar:
+                    hashes[layer] = hash_layer(layer_tar)
+
+                tmp.seek(0, os.SEEK_SET)
+                output_tar.addfile(ti, tmp)
+            continue
+
+        if os.path.basename(ti.name) == 'VERSION':
+            output_tar.addfile(ti, input_tar.extractfile(ti))
+            continue
+
+        # unknown file in the tar archive
+        assert False
+
+    # verify layer hashes
+    assert len(layers) == len(hashes)
+    for layer in layers.keys():
+        h = hashes[layer]
+        _, checksum = layers[layer]['checksum'].split(':')
+
+        # special case the base layer due to a bug:
+        # https://github.com/docker/distribution/issues/112
+        if layer == '511136ea3c5a64f264b78b5433614aec563103b4d4702f3ba7d4d2698e22c158':
+            assert checksum == 'eab7fe9f231cc993c405151ea1e0bde78f42bd076b2be0c30839074ee4b7e279'
+            assert h == 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+            continue
+
+        if h == checksum:
+            continue
+
+        sys.stderr.write('%s: layer checksum invalid: layer = %s, checksum = %s, expected = %s\n' % (
+            PROG,
+            layer,
+            h,
+            checksum,
+        ))
+        assert False
+
+def run():
+    with tarfile.open(fileobj=sys.stdin, mode='r|', format=tarfile.GNU_FORMAT) as input_tar:
+        with tarfile.open(fileobj=sys.stdout, mode='w|', format=tarfile.GNU_FORMAT) as output_tar:
+            validate(output_tar, input_tar)
+
+def main():
+
+    # parse argument
+    parser = argparse.ArgumentParser(description='Juggle docker image between hosts. Verify docker image tar.')
+    args = parser.parse_args()
+
+    run()
+
+if __name__ == '__main__':
+    main()
+
