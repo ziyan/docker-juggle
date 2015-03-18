@@ -1,0 +1,13 @@
+{
+	"ImportPath": "github.com/ziyan/docker-juggle",
+	"GoVersion": "go1.4.1",
+	"Packages": [
+		"./..."
+	],
+	"Deps": [
+		{
+			"ImportPath": "github.com/golang/glog",
+			"Rev": "44145f04b68cf362d9c4df2182967c2275eaefed"
+		}
+	]
+}
