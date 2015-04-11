@@ -1,12 +1,17 @@
 package main
 
 import (
+	"archive/tar"
 	"flag"
 	"github.com/golang/glog"
+	"github.com/ziyan/docker-juggle/pkg/docker"
+	"io"
 	"os"
 	"runtime"
-	"archive/tar"
-    "io"
+)
+
+var (
+	base = flag.String("base", "511136ea3c5a64f264b78b5433614aec563103b4d4702f3ba7d4d2698e22c158", "base image tag")
 )
 
 func main() {
@@ -16,18 +21,52 @@ func main() {
 
 	flag.Parse()
 
-	glog.Warningf("docker-juggle-compress: starting ...")
+	if err := run(); err != nil {
+		glog.Errorf("docker-juggle-compress: %v", err)
+		os.Exit(1)
+	}
+}
 
-	tr := tar.NewReader(os.Stdin)
-    for {
-        hdr, err := tr.Next()
-        if err == io.EOF {
-            break
-        }
-        if err != nil {
-            break
-        }
+func run() error {
 
-        glog.Warningf("docker-juggle-compress: %s", hdr.Name)
-    }
+	if _, err := docker.History(*base); err != nil {
+		return err
+	}
+
+	saved, cmd, err := docker.Save(*base)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := cmd.Wait(); err != nil {
+			panic(err)
+		}
+	}()
+
+	for {
+		hdr, err := saved.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		glog.Warningf("docker-juggle-compress: %s", hdr.Name)
+	}
+
+	input := tar.NewReader(os.Stdin)
+	for {
+		hdr, err := input.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		glog.Warningf("docker-juggle-compress: %s", hdr.Name)
+	}
+
+	return nil
 }
