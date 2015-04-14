@@ -2,18 +2,18 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/hex"
 	"flag"
 	"github.com/golang/glog"
 	"github.com/ziyan/docker-juggle/pkg/docker"
 	"io"
 	"os"
 	"runtime"
-	"strings"
-	"crypto/sha1"
-	"encoding/hex"
-	"bytes"
 	"strconv"
-	"encoding/base64"
+	"strings"
 )
 
 var (
@@ -112,7 +112,7 @@ func index(saved *tar.Reader) (map[string][]string, error) {
 
 			if header.Size == 0 {
 				continue
-			} 
+			}
 
 			// calculate hash
 			hasher := sha1.New()

@@ -2,9 +2,9 @@ package docker
 
 import (
 	"archive/tar"
+	"bufio"
 	"github.com/golang/glog"
 	"os/exec"
-	"bufio"
 )
 
 func History(image string) ([]string, error) {
