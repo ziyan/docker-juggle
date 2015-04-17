@@ -4,16 +4,14 @@ import (
 	"archive/tar"
 	"bytes"
 	"crypto/sha1"
-	"encoding/base64"
-	"encoding/hex"
 	"flag"
 	"github.com/golang/glog"
 	"github.com/ziyan/docker-juggle/pkg/docker"
 	"io"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
+	"encoding/hex"
 )
 
 var (
@@ -96,8 +94,10 @@ func index(saved *tar.Reader) (map[string][]string, error) {
 			continue
 		}
 
-		layer := strings.TrimSuffix(header.Name, "/layer.tar")
-		glog.V(2).Infof("index: layer: %s", layer)
+		layer, err := hex.DecodeString(strings.TrimSuffix(header.Name, "/layer.tar"))
+		if err != nil {
+			return nil, err
+		}
 
 		reader := tar.NewReader(saved)
 
@@ -119,10 +119,9 @@ func index(saved *tar.Reader) (map[string][]string, error) {
 			if _, err := io.Copy(hasher, reader); err != nil {
 				return nil, err
 			}
-			hash := hex.EncodeToString(hasher.Sum(nil))
+			hash := string(hasher.Sum(nil))
 
-			glog.V(2).Infof("index: layer: %s: %s = %s", layer, header.Name, hash)
-			index[hash] = []string{layer, header.Name}
+			index[hash] = []string{string(layer), header.Name}
 		}
 	}
 
@@ -131,6 +130,8 @@ func index(saved *tar.Reader) (map[string][]string, error) {
 }
 
 func compress(output *tar.Writer, input *tar.Reader, history []string, index map[string][]string) error {
+
+	usage := make(map[string][]string)
 
 	for {
 		header, err := input.Next()
@@ -172,7 +173,7 @@ func compress(output *tar.Writer, input *tar.Reader, history []string, index map
 		buffer := bytes.NewBuffer(nil)
 		writer := tar.NewWriter(buffer)
 		defer writer.Close()
-		if err := diff(writer, reader, index); err != nil {
+		if err := diff(writer, reader, index, usage); err != nil {
 			return err
 		}
 		if err := writer.Close(); err != nil {
@@ -192,10 +193,12 @@ func compress(output *tar.Writer, input *tar.Reader, history []string, index map
 		}
 	}
 
+	glog.V(2).Infof("compress: %d file reused", len(usage))
+
 	return nil
 }
 
-func diff(writer *tar.Writer, reader *tar.Reader, index map[string][]string) error {
+func diff(writer *tar.Writer, reader *tar.Reader, index, usage map[string][]string) error {
 
 	for {
 		header, err := reader.Next()
@@ -226,7 +229,7 @@ func diff(writer *tar.Writer, reader *tar.Reader, index map[string][]string) err
 		if _, err := io.Copy(io.MultiWriter(hasher, buffer), reader); err != nil {
 			return err
 		}
-		hash := hex.EncodeToString(hasher.Sum(nil))
+		hash := string(hasher.Sum(nil))
 
 		// copy new file
 		info, ok := index[hash]
@@ -247,10 +250,8 @@ func diff(writer *tar.Writer, reader *tar.Reader, index map[string][]string) err
 		}
 
 		// use index info
-		header.Xattrs = make(map[string]string, 3)
-		header.Xattrs["docker.juggle.layer"] = info[0]
-		header.Xattrs["docker.juggle.name"] = base64.StdEncoding.EncodeToString([]byte(info[1]))
-		header.Xattrs["docker.juggle.size"] = strconv.FormatInt(header.Size, 10)
+		usage[hash] = info
+		header.Xattrs = map[string]string{"hash": hash}
 		header.Size = 0
 
 		if err := writer.WriteHeader(header); err != nil {
