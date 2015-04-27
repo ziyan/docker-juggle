@@ -115,7 +115,6 @@ def decompress_layer(layer_tar, diff_tar):
 
         # restore mode bits
         ti2.mode = int(headers.get('docker.juggle.mode', ti.mode))
-        sys.stderr.write('%d\n' % ti2.mode)
 
         # add non file directly
         if not ti.isfile():
