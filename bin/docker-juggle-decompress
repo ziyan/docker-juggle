@@ -106,7 +106,7 @@ def save_image(image):
     return tarfile.open(fileobj=process.stdout, mode='r|')
 
 def decompress_layer(layer_tar, diff_tar):
-    index = collections.defaultdict(dict)
+    index = collections.defaultdict(lambda: collections.defaultdict(list))
 
     for ti in diff_tar:
 
@@ -145,7 +145,7 @@ def decompress_layer(layer_tar, diff_tar):
         ti2.size = size
 
         # remember where to put file when we found it in base
-        index[layer][name] = (layer_tar, ti2)
+        index[layer][name].append((layer_tar, ti2))
 
     return index
 
@@ -174,10 +174,30 @@ def construct_from_base(output_tar, base_tar, layers, index):
                 results = index[layer].get(ti.name, None)
                 if not results:
                     continue
-                tar, ti2 = results
-                assert ti2.size == ti.size
 
-                tar.addfile(ti2, layer_tar.extractfile(ti))
+                # if the known file is unique
+                if len(results) == 1:
+                    tar, ti2 = results[0]
+                    assert ti2.size == ti.size
+
+                    tar.addfile(ti2, layer_tar.extractfile(ti))
+                    continue
+
+                # if the same file is shared at multiple places
+                tmp = StringIO()
+                f = layer_tar.extractfile(ti)
+                while True:
+                    buf = f.read(4096)
+                    if not buf:
+                        break
+                    tmp.write(buf)
+
+                for result in results:
+                    tar, ti2 = result
+                    assert ti2.size == ti.size
+
+                    tmp.seek(0, os.SEEK_SET)
+                    tar.addfile(ti2, tmp)
 
 def write_layer_tar(output_tar, layer, tar, tmp):
     # close up layer.tar
