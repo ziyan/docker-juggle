@@ -14,6 +14,6 @@ Decompress
 ----------
 
 ``
-cat compressed.tar.gz | docker-juggle-decompress | docker-juggle-verify | docker load
+cat compressed.tar.gz | docker-juggle-decompress | docker load
 ``
 

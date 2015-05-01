@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 
 def index(image):
     home_dir = os.environ.get('HOME', '~')
-    index_dir = os.path.join(home_dir, '.dockerjuggle', VERSION, 'index')
+    index_dir = os.path.join(home_dir, '.docker-juggle', VERSION, 'index')
     if not os.path.exists(index_dir):
         os.makedirs(index_dir)
 
@@ -24,7 +24,7 @@ def index(image):
     with docker.save_image(image) as t:
         index = _index_image(t)
         with open(index_path, 'wb') as f:
-            json.dump(index, f)
+            json.dump(index, f, sort_keys=True, indent=4, separators=(',', ': '))
         return index
 
 def _index_image(t):
