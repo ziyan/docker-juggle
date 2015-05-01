@@ -1,183 +1,17 @@
 #!/usr/bin/env python
 
-import subprocess
+import dockerjuggle.compress
 import argparse
 import sys
-import os
-import tarfile
-import hashlib
-import base64
-import time
-
-try:
-    from cStringIO import StringIO
-except ImportError:
-    from StringIO import StringIO
-
-PROG = os.path.basename(sys.argv[0])
-HEADERS = [
-    'name',
-    'mode',
-    'uid',
-    'gid',
-    'size',
-    'type',
-    'linkname',
-    'uname',
-    'gname',
-    'devmajor',
-    'devminor',
-]
-
-def duplicate_tar_info(ti):
-    ti2 = tarfile.TarInfo()
-    for field in HEADERS:
-        setattr(ti2, field, getattr(ti, field))
-    ti2.mtime = time.time()
-    return ti2
-
-def get_image_history(image):
-    output = subprocess.check_output(['docker', 'history', '-q', '--no-trunc', image])
-    images = filter(None, output.split())
-    assert len(images) > 0
-    return images
-
-def save_image(image):
-    process = subprocess.Popen(['docker', 'save', image], stdout=subprocess.PIPE)
-    return tarfile.open(fileobj=process.stdout, mode='r|')
-
-def buffer_and_hash_file(f):
-    tmp = StringIO()
-    hasher = hashlib.sha256()
-    while True:
-        buf = f.read(4096)
-        if not buf:
-            break
-        tmp.write(buf)
-        hasher.update(buf)
-    tmp.seek(0, os.SEEK_SET)
-    return tmp, hasher.hexdigest()
-
-def index_image(tar):
-    index = dict()
-    for ti in tar:
-        if not ti.isfile():
-            continue
-        if not ti.name.endswith('/layer.tar'):
-            continue
-        layer, filename = ti.name.split('/')
-        assert filename == 'layer.tar'
-
-        sys.stderr.write('%s: indexing: %s ...\n' % (PROG, layer))
-
-        with tarfile.open(fileobj=tar.extractfile(ti), mode='r|') as t:
-            for ti in t:
-
-                # do not index small files, they cannot be compressed efficiently
-                if not ti.isfile() or ti.size <= 0:
-                    continue
-
-                # hash file content
-                _, h = buffer_and_hash_file(t.extractfile(ti))
-                index[h] = (layer, ti.name)
-
-    return index
-
-def compress_layer(diff_tar, layer_tar, base_index):
-
-    # add each member of layer
-    for ti in layer_tar:
-
-        # save the mode bits because pax will mess it up
-        ti2 = duplicate_tar_info(ti)
-        ti2.pax_headers['docker.juggle.mode'] = str(ti.mode)
-
-        # for non-file members, add them directly
-        if not ti.isfile():
-            diff_tar.addfile(ti2)
-            continue
-
-        # add small files directly
-        if ti.size <= 0:
-            diff_tar.addfile(ti2)
-            continue
-
-        # calculate hash for file
-        tmp, h = buffer_and_hash_file(layer_tar.extractfile(ti))
-        results = base_index.get(h, None)
-
-        # if file content is new, make a copy in the diff tar
-        if not results:
-            diff_tar.addfile(ti2, tmp)
-            sys.stderr.write('\t%s\n' % ti.name)
-            continue
-
-        # otherwise, simply add pointer to the existing file
-        layer, name = results
-        size = ti.size
-
-        ti2.size = 0
-        ti2.pax_headers['docker.juggle.layer'] = layer
-        ti2.pax_headers['docker.juggle.name'] = base64.b64encode(name)
-        ti2.pax_headers['docker.juggle.size'] = str(size)
-        diff_tar.addfile(ti2)
-
-def compress(output_tar, input_tar, base_history, base_index):
-
-    for ti in input_tar:
-
-        # add directories
-        if not ti.isfile():
-            assert ti.isdir()
-            output_tar.addfile(ti)
-            continue
-
-        # copy meta data
-        if os.path.basename(ti.name) != 'layer.tar':
-            output_tar.addfile(ti, input_tar.extractfile(ti))
-            continue
-
-        layer = os.path.dirname(ti.name)
-        sys.stderr.write('%s: compressing: %s ...\n' % (PROG, layer))
-
-        # if layer is the same in both images
-        # only create the layer directory with meta data
-        if layer in base_history:
-            continue
-
-        # create a temp file to hold the diff tar output
-        tmp = StringIO()
-
-        # compress layer
-        with tarfile.open(fileobj=input_tar.extractfile(ti), mode='r|') as layer_tar:
-            with tarfile.open(fileobj=tmp, mode='w|gz', format=tarfile.PAX_FORMAT) as diff_tar:
-                compress_layer(diff_tar, layer_tar, base_index)
-
-        # add to output
-        ti.size = tmp.tell()
-        ti.name = os.path.join(layer, 'diff.tar.gz')
-
-        tmp.seek(0, os.SEEK_SET)
-        output_tar.addfile(ti, tmp)
+import logging
 
 def run(base):
-    with tarfile.open(fileobj=sys.stdin, mode='r|')  as input_tar:
-
-        # get history of images
-        base_history = get_image_history(base)
-
-        with save_image(base_history[0]) as base_tar:
-
-            # index base image
-            base_index = index_image(base_tar)
-
-            # compress
-            headers = {'docker.juggle.base': base_history[0]}
-
-            with tarfile.open(fileobj=sys.stdout, mode='w|gz', format=tarfile.PAX_FORMAT, pax_headers=headers) as output_tar:
-                compress(output_tar, input_tar, base_history, base_index)
+    dockerjuggle.compress.compress(sys.stdout, sys.stdin, base)
 
 def main():
+
+    # setup logging
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr, format='docker-juggle-compress: %(message)s')
 
     # parse argument
     parser = argparse.ArgumentParser(description='Juggle docker image between hosts. Export docker image diffs.')
@@ -188,4 +22,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
