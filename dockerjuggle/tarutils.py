@@ -85,7 +85,7 @@ def duplicate(original):
     ti.mtime = time.time()
     return ti
 
-def hash(ti, f=None):
+def hash(ti):
     header = ''
     for field in HEADERS:
         value = getattr(ti, field)

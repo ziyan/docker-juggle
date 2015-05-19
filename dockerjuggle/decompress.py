@@ -1,4 +1,4 @@
-from . import docker, utils, tar, VERSION
+from . import docker, utils, tarutils, VERSION
 import os
 import tarfile
 import tempfile
@@ -70,8 +70,10 @@ def _decompress(output_tar, input_tar, base_tar, base_history):
         _construct_from_base(output_tar, base_tar, layers, index)
 
         # validate checksums
-        for layer in layers.keys():
-            assert checksums[layer] == tar.checksums(hashes[layer])
+        for layer, checksum in checksums.iteritems():
+            computed_checksum = tarutils.checksum(hashes[layer])
+            logging.debug('layer = %s, hashes = %d, checksum = %s, expected = %s', layer, len(hashes[layer]), computed_checksum, checksum)
+            assert computed_checksum == checksum
         
         # last, write the layer.tar files in the output tar
         for layer, not_changed in layers.iteritems():
@@ -92,20 +94,21 @@ def _decompress(output_tar, input_tar, base_tar, base_history):
 def _decompress_layer(layer_tar, diff_tar, index, hashes):
     for ti in diff_tar:
 
-        ti2 = tar.duplicate(ti)
+        ti2 = tarutils.duplicate(ti)
         assert ti2.mode >= 1000
 
         # add non file directly
         if not ti.isfile():
             layer_tar.addfile(ti2)
-            hashes.append(tar.hash(ti2))
+            hashes.append(tarutils.hash(ti2))
             continue
 
         # add non empty file directly
         if ti.size > 0:
             tmp, h = utils.buffer_and_hash_file(diff_tar.extractfile(ti))
+            tmp.seek(0, os.SEEK_SET)
             layer_tar.addfile(ti2, tmp)
-            hashes.append(tar.hash(ti2) + h)
+            hashes.append(tarutils.hash(ti2) + h)
             continue
 
         layer = ti.pax_headers.get('docker.juggle.layer', None)
@@ -115,7 +118,7 @@ def _decompress_layer(layer_tar, diff_tar, index, hashes):
         if not layer or not name:
             assert not layer and not name
             layer_tar.addfile(ti2)
-            hashes.append(tar.hash(ti2))
+            hashes.append(tarutils.hash(ti2))
             continue
 
         # file is same from base, remember to extract it
@@ -146,7 +149,11 @@ def _construct_from_base(output_tar, base_tar, layers, index):
                 if not ti.isfile() or ti.size <= 0:
                     continue
                 
-                results = index[layer].get(ti.name, None)
+                name = ti.name
+                if not isinstance(name, unicode):
+                    name = name.decode('utf8')
+
+                results = index[layer].get(name, None)
                 if not results:
                     continue
 
@@ -157,7 +164,7 @@ def _construct_from_base(output_tar, base_tar, layers, index):
 
                     tmp.seek(0, os.SEEK_SET)
                     tar.addfile(ti2, tmp)
-                    hashes.append(tar.hash(ti2) + h)
+                    hashes.append(tarutils.hash(ti2) + h)
 
 def _write_layer_tar(output_tar, layer, tar, tmp):
     # close up layer.tar

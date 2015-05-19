@@ -47,8 +47,12 @@ def _index_image(t):
                 if not ti2.isfile() or ti2.size <= 0:
                     continue
 
+                name = ti2.name
+                if not isinstance(name, unicode):
+                    name = name.decode('utf8')
+
                 # hash file content
                 h = utils.hash_file(t2.extractfile(ti2))
-                index[h] = [layer, ti2.name]
+                index[h] = [layer, name]
 
     return index

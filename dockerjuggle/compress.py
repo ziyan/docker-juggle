@@ -1,4 +1,4 @@
-from . import docker, index, utils, tar, VERSION
+from . import docker, index, utils, tarutils, VERSION
 import os
 import tarfile
 
@@ -56,7 +56,9 @@ def _compress(output_tar, input_tar, base_history, base_index):
         checksum = None
         with tarfile.open(fileobj=input_tar.extractfile(ti), mode='r|') as layer_tar:
             with tarfile.open(fileobj=tmp, mode='w|gz', format=tarfile.PAX_FORMAT) as diff_tar:
-                checksum = _compress_layer(diff_tar, layer_tar, base_index)
+                hashes = _compress_layer(diff_tar, layer_tar, base_index)
+                checksum = tarutils.checksum(hashes)
+                logging.debug('layer = %s, hashes = %d, checksum = %s', layer, len(hashes), checksum)
 
         # add to output
         ti.size = tmp.tell()
@@ -72,24 +74,24 @@ def _compress_layer(diff_tar, layer_tar, base_index):
 
     # add each member of layer
     for ti in layer_tar:
-        ti2 = tar.duplicate(ti)
+        ti2 = tarutils.duplicate(ti)
 
         # for non-file members, add them directly
         if not ti.isfile():
-            hashes.append(tar.hash(ti))
+            hashes.append(tarutils.hash(ti))
             diff_tar.addfile(ti2)
             continue
 
         # add small files directly
         if ti.size <= 0:
-            hashes.append(tar.hash(ti))
+            hashes.append(tarutils.hash(ti))
             diff_tar.addfile(ti2)
             continue
 
         # calculate hash for file
         tmp, h = utils.buffer_and_hash_file(layer_tar.extractfile(ti))
         results = base_index.get(h, None)
-        hashes.append(tar.hash(ti) + h)
+        hashes.append(tarutils.hash(ti) + h)
 
         # if file content is new, make a copy in the diff tar
         if not results:
@@ -100,12 +102,10 @@ def _compress_layer(diff_tar, layer_tar, base_index):
 
         # otherwise, simply add pointer to the existing file
         layer, name = results
-        if not isinstance(name, unicode):
-            name = name.decode('utf8')
 
         ti2.size = 0
         ti2.pax_headers['docker.juggle.layer'] = layer
         ti2.pax_headers['docker.juggle.name'] = name
         diff_tar.addfile(ti2)
 
-    return tar.checksum(hashes)
+    return hashes

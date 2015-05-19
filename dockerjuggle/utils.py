@@ -39,5 +39,5 @@ def buffer_file(f):
         tmp.write(buf)
     return tmp
 
-def hash(data, f=None):
+def hash(data):
     return hashlib.sha256(data).hexdigest()
