@@ -63,7 +63,7 @@ def _decompress(output_tar, input_tar, base_tar, base_history):
 
             # apply the diff, for this step, we are only extracting changed files
             with tarfile.open(fileobj=input_tar.extractfile(ti), mode='r|gz', format=tarfile.PAX_FORMAT) as diff_tar:
-                checksums[layer] = diff_tar.pax_headers['docker.juggle.checksum']
+                checksums[layer] = ti.pax_headers['docker.juggle.checksum']
                 _decompress_layer(tars[layer], diff_tar, index, hashes[layer])
 
         # then, go through base tar and gather missed files
