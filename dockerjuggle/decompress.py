@@ -27,6 +27,7 @@ def _decompress(output_tar, input_tar, base_tar, base_history):
     tmps = dict()
     tars = dict()
     hashes = collections.defaultdict(list)
+    specials = []
     checksums = dict()
     index = collections.defaultdict(lambda: collections.defaultdict(list))
 
@@ -64,10 +65,13 @@ def _decompress(output_tar, input_tar, base_tar, base_history):
             # apply the diff, for this step, we are only extracting changed files
             with tarfile.open(fileobj=input_tar.extractfile(ti), mode='r|gz', format=tarfile.PAX_FORMAT) as diff_tar:
                 checksums[layer] = ti.pax_headers['docker.juggle.checksum']
-                _decompress_layer(tars[layer], diff_tar, index, hashes[layer])
+                _decompress_layer(tars[layer], diff_tar, specials, index, hashes[layer])
 
         # then, go through base tar and gather missed files
         _construct_from_base(output_tar, base_tar, layers, index)
+
+        # last, restore special files
+        _restore_special_files(specials)
 
         # validate checksums
         for layer, checksum in checksums.iteritems():
@@ -91,16 +95,21 @@ def _decompress(output_tar, input_tar, base_tar, base_history):
         for tmp in tmps.values():
             tmp.close()
 
-def _decompress_layer(layer_tar, diff_tar, index, hashes):
+def _decompress_layer(layer_tar, diff_tar, specials, index, hashes):
     for ti in diff_tar:
 
         ti2 = tarutils.duplicate(ti)
         assert ti2.mode >= 1000
 
-        # add non file directly
-        if not ti.isfile():
+        # add directory directly
+        if ti.isdir():
             layer_tar.addfile(ti2)
             hashes.append(tarutils.hash(ti2))
+            continue
+
+        # store special files for last
+        if not ti.isfile():
+            specials.append((layer_tar, ti2, hashes))
             continue
 
         # add non empty file directly
@@ -165,6 +174,11 @@ def _construct_from_base(output_tar, base_tar, layers, index):
                     tmp.seek(0, os.SEEK_SET)
                     tar.addfile(ti2, tmp)
                     hashes.append(tarutils.hash(ti2) + h)
+
+def _restore_special_files(specials):
+    for layer_tar, ti, hashes in specials:
+        layer_tar.addfile(ti)
+        hashes.append(tarutils.hash(ti))
 
 def _write_layer_tar(output_tar, layer, tar, tmp):
     # close up layer.tar
