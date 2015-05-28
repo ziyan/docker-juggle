@@ -3,6 +3,13 @@ docker-juggle
 
 This util helps compressing docker images before manually moving them to other hosts. This is especially useful if you have large docker images and layers that you make minor incremental changes to, and that your environment prevents you from using a docker registry.
 
+Install
+-------
+
+``
+pip install git+https://github.com/ziyan/docker-juggle.git
+``
+
 Compress
 --------
 
