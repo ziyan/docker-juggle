@@ -6,21 +6,21 @@ This util helps compressing docker images before manually moving them to other h
 Install
 -------
 
-``
+```shell
 pip install git+https://github.com/ziyan/docker-juggle.git
-``
+```
 
 Compress
 --------
 
-``
+```shell
 docker save <image-tag> | docker-juggle-compress <previous-known-image-tag> > compressed.tar.gz
-``
+```
 
 Decompress
 ----------
 
-``
+```shell
 cat compressed.tar.gz | docker-juggle-decompress | docker load
-``
+```
 
