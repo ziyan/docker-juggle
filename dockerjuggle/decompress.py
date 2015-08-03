@@ -73,12 +73,16 @@ def _decompress(output_tar, input_tar, base_tar, base_history):
         # last, restore special files
         _restore_special_files(specials)
 
+        # we should not have anything left unrestored
+        for layer, results in index.iteritems():
+            assert len(results) == 0
+
         # validate checksums
         for layer, checksum in checksums.iteritems():
             computed_checksum = tarutils.checksum(hashes[layer])
             logging.debug('layer = %s, hashes = %d, checksum = %s, expected = %s', layer, len(hashes[layer]), computed_checksum, checksum)
             assert computed_checksum == checksum
-        
+
         # last, write the layer.tar files in the output tar
         for layer, not_changed in layers.iteritems():
             tmp = tmps.get(layer, None)
@@ -147,33 +151,41 @@ def _construct_from_base(output_tar, base_tar, layers, index):
 
         layer, _ = ti.name.split(os.path.sep)
 
-        # if layer did not have a diff.tar.gz, the layer must have be identical
-        # copy layer.tar directly
-        if layer in layers and layers[layer] is True:
-            output_tar.addfile(ti, base_tar.extractfile(ti))
-            continue
+        layer_tmp = tempfile.TemporaryFile(prefix='docker-juggle-', suffix='.tar')
+        try:
+            utils.buffer_copy(layer_tmp, base_tar.extractfile(ti))
 
-        with tarfile.open(fileobj=base_tar.extractfile(ti), mode='r|') as layer_tar:
-            for ti in layer_tar:
-                if not ti.isfile() or ti.size <= 0:
-                    continue
-                
-                name = ti.name
-                if not isinstance(name, unicode):
-                    name = name.decode('utf8')
+            # if layer did not have a diff.tar.gz, the layer must have be identical
+            # copy layer.tar directly
+            layer_tarfile = None
+            if layer in layers and layers[layer] is True:
+                layer_tmp.seek(0, os.SEEK_SET)
+                output_tar.addfile(ti, layer_tmp)
 
-                results = index[layer].get(name, None)
-                if not results:
-                    continue
+            layer_tmp.seek(0, os.SEEK_SET)
+            with tarfile.open(fileobj=layer_tmp, mode='r|') as layer_tar:
+                for ti in layer_tar:
+                    if not ti.isfile() or ti.size <= 0:
+                        continue
 
-                tmp, h = utils.buffer_and_hash_file(layer_tar.extractfile(ti))
-                for result in results:
-                    tar, ti2, hashes = result
-                    ti2.size = ti.size
+                    name = ti.name
+                    if not isinstance(name, unicode):
+                        name = name.decode('utf8')
 
-                    tmp.seek(0, os.SEEK_SET)
-                    tar.addfile(ti2, tmp)
-                    hashes.append(tarutils.hash(ti2) + h)
+                    results = index[layer].pop(name, None)
+                    if not results:
+                        continue
+
+                    tmp, h = utils.buffer_and_hash_file(layer_tar.extractfile(ti))
+                    for result in results:
+                        tar, ti2, hashes = result
+                        ti2.size = ti.size
+
+                        tmp.seek(0, os.SEEK_SET)
+                        tar.addfile(ti2, tmp)
+                        hashes.append(tarutils.hash(ti2) + h)
+        finally:
+            layer_tmp.close()
 
 def _restore_special_files(specials):
     for layer_tar, ti, hashes in specials:

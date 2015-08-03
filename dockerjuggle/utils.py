@@ -13,7 +13,7 @@ def create_buffer():
 def hash_file(f):
     hasher = hashlib.sha256()
     while True:
-        buf = f.read(4096)
+        buf = f.read(1024*1024)
         if not buf:
             break
         hasher.update(buf)
@@ -23,7 +23,7 @@ def buffer_and_hash_file(f):
     tmp = create_buffer()
     hasher = hashlib.sha256()
     while True:
-        buf = f.read(4096)
+        buf = f.read(1024*1024)
         if not buf:
             break
         tmp.write(buf)
@@ -32,12 +32,15 @@ def buffer_and_hash_file(f):
 
 def buffer_file(f):
     tmp = create_buffer()
+    buffer_copy(tmp, f)
+    return tmp
+
+def buffer_copy(dst, src):
     while True:
-        buf = f.read(4096)
+        buf = src.read(1024*1024)
         if not buf:
             break
-        tmp.write(buf)
-    return tmp
+        dst.write(buf)
 
 def hash(data):
     return hashlib.sha256(data).hexdigest()
